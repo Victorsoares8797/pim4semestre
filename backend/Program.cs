@@ -1,24 +1,46 @@
 using System.Threading.RateLimiting;
 using Buillon.Negocio;
 using Buillon.Repositorio;
-using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Extensions.FileProviders;
 using Npgsql;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true).AddEnvironmentVariables();
-builder.Services.AddSingleton<BuillonContext>();
-builder.Services.AddScoped<UsuarioRepositorio>();
-builder.Services.AddScoped<RestauranteRepositorio>();
+builder.Services.AddDbContext<BuillonContext>(options =>
+{
+    var conexao = builder.Configuration.GetConnectionString("Supabase");
+    if (string.IsNullOrWhiteSpace(conexao))
+        throw new ApiException(503, "Configure ConnectionStrings:Supabase no servidor.");
+    options.UseNpgsql(conexao);
+});
+builder.Services.AddScoped<IUsuarioRepositorio, UsuarioRepositorio>();
+builder.Services.AddScoped<IRestauranteRepositorio, RestauranteRepositorio>();
 builder.Services.AddScoped<AvaliacaoRepositorio>();
 builder.Services.AddScoped<AutenticacaoNegocio>();
 builder.Services.AddScoped<RestauranteNegocio>();
 builder.Services.AddSingleton<IPasswordHasher<string>, PasswordHasher<string>>();
-builder.Services.AddMemoryCache();
+var configuracaoJwt = new ConfiguracaoJwt(builder.Configuration["Jwt:Key"],
+    Path.Combine(builder.Environment.ContentRootPath, ".local"));
+builder.Services.AddSingleton(configuracaoJwt);
 builder.Services.AddSingleton<SessaoNegocio>();
-builder.Services.AddAuthentication(SessaoNegocio.Esquema)
-    .AddScheme<AuthenticationSchemeOptions, SessaoHandler>(SessaoNegocio.Esquema, null);
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.MapInboundClaims = false;
+        options.TokenValidationParameters = configuracaoJwt.ParametrosValidacao();
+        options.Events = new JwtBearerEvents
+        {
+            OnTokenValidated = context =>
+            {
+                if (context.HttpContext.RequestServices.GetRequiredService<SessaoNegocio>().EstaRevogado(context.Principal!))
+                    context.Fail("Sessão encerrada.");
+                return Task.CompletedTask;
+            }
+        };
+    });
 builder.Services.AddAuthorization();
 builder.Services.AddRateLimiter(options =>
 {
@@ -32,14 +54,18 @@ var origens = (builder.Configuration["Buillon:OrigensWeb"] ?? "http://localhost:
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
     policy.WithOrigins(origens).AllowAnyHeader().AllowAnyMethod()));
 builder.Services.AddControllers();
+builder.Services.AddOpenApi();
 
 var app = builder.Build();
+if (app.Environment.IsDevelopment()) app.MapOpenApi();
 app.UseExceptionHandler(handler => handler.Run(async context =>
 {
     var error = context.Features.Get<Microsoft.AspNetCore.Diagnostics.IExceptionHandlerFeature>()?.Error;
-    var (status, message) = error switch
+    var causa = error is DbUpdateException { InnerException: not null } banco ? banco.InnerException : error;
+    var (status, message) = causa switch
     {
         ApiException api => (api.Status, api.Message),
+        ArgumentException argumento => (400, argumento.Message),
         PostgresException { SqlState: PostgresErrorCodes.UniqueViolation } => (409, "Já existe um registro com esses dados."),
         PostgresException { SqlState: PostgresErrorCodes.ForeignKeyViolation } => (409, "O registro relacionado não está disponível."),
         NpgsqlException => (503, "O banco BUILLON está indisponível. Confira a conexão com o Supabase."),
@@ -81,20 +107,21 @@ app.UseAuthorization();
 app.MapControllers();
 app.MapGet("/api/health", async (BuillonContext database, CancellationToken ct) =>
 {
-    await using var connection = await database.ConectarAsync(ct);
-    await using var command = connection.CreateCommand();
-    command.CommandText = """
+    var pronto = await database.Database.SqlQuery<bool>($"""
         SELECT count(*) = 14 AND to_regprocedure('buillon.ranking_estabelecimentos()') IS NOT NULL
             AND EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = 'buillon' AND table_name = 'estabelecimento' AND column_name = 'chave_exemplo')
+                WHERE table_schema = 'buillon' AND table_name = 'estabelecimento' AND column_name = 'chave_exemplo') AS "Value"
         FROM information_schema.tables
         WHERE table_schema = 'buillon' AND table_type = 'BASE TABLE'
             AND table_name IN ('cliente', 'fornecedor', 'estabelecimento', 'endereco', 'categoria', 'nps',
                 'buillon_app_perfil', 'buillon_app_favorito', 'buillon_app_cardapio', 'buillon_app_foto',
                 'estabelecimento_imagem', 'estabelecimento_publicacao', 'fornecedor_perfil', 'fornecedor_favorito')
-        """;
-    if (await command.ExecuteScalarAsync(ct) is not true)
+        """).SingleAsync(ct);
+    if (!pronto)
         throw new ApiException(503, "Aplique a migração do Buillon no Supabase.");
     return Results.Ok(new { status = "ok" });
 });
 app.Run();
+
+// Permite hospedar a API real nos testes de integração.
+public partial class Program { }

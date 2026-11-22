@@ -1,86 +1,81 @@
-using System.Globalization;
 using Buillon.Modelos;
 using Buillon.Negocio;
-using static Buillon.Repositorio.BuillonContext;
+using Microsoft.EntityFrameworkCore;
 
 namespace Buillon.Repositorio;
 
-public sealed class UsuarioRepositorio(BuillonContext context)
+public class UsuarioRepositorio(BuillonContext context) : IUsuarioRepositorio
 {
-    internal async Task<(PerfilUsuario Perfil, string? Senha)?> ObterPorEmailAsync(
-        string email, string role, string? documento, CancellationToken ct)
+    public async Task<Usuario?> ObterPorEmailAsync(string email, string role = Perfis.Cliente,
+        string? documento = null, CancellationToken ct = default)
     {
-        var sql = role == Perfis.Proprietario
-            ? """
-              SELECT F.ID_FORNECEDOR, F.NOME_RESPONSAVEL, F.EMAIL, F.SENHA, P.AVATAR, P.BIO
-              FROM buillon.FORNECEDOR F LEFT JOIN buillon.FORNECEDOR_PERFIL P ON P.ID_FORNECEDOR = F.ID_FORNECEDOR
-              WHERE lower(btrim(F.EMAIL)) = @email
-                  AND (@documento IS NULL OR translate(F.DOCUMENTO, './- ', '') = @documento)
-              """
-            : """
-              SELECT C.ID_CLIENTE, C.NOME, C.EMAIL, C.SENHA, P.AVATAR, P.BIO
-              FROM buillon.CLIENTE C LEFT JOIN buillon.BUILLON_APP_PERFIL P ON P.ID_CLIENTE = C.ID_CLIENTE
-              WHERE lower(btrim(C.EMAIL)) = @email
-                  AND (@documento IS NULL OR translate(C.CPF, './- ', '') = @documento)
-              """;
-        var rows = await context.ConsultarAsync(sql, r =>
-            (Perfil(r.GetInt32(0), r.GetString(1), r.GetString(2),
-                r.IsDBNull(4) ? Perfis.AvatarPadrao : r.GetString(4), r.IsDBNull(5) ? "" : r.GetString(5)),
-                r.IsDBNull(3) ? null : r.GetString(3)), ct, Texto("@email", email), Texto("@documento", documento));
-        return rows.Count == 1 ? rows[0] : null;
+        if (role == Perfis.Proprietario)
+        {
+            var conta = await context.Fornecedores.AsNoTracking().Include(f => f.Perfil)
+                .SingleOrDefaultAsync(f => f.Email != null && f.Email.Trim().ToLower() == email, ct);
+            return conta is not null && ConfereDocumento(conta.Documento, documento) ? conta.ParaUsuario() : null;
+        }
+        var usuario = await context.Usuarios.AsNoTracking().Include(u => u.Perfil)
+            .SingleOrDefaultAsync(u => u.Email.Trim().ToLower() == email, ct);
+        return usuario is not null && ConfereDocumento(usuario.Documento, documento) ? usuario : null;
     }
 
-    internal async Task<PerfilUsuario> AdicionarAsync(string nome, string email, string senhaHash,
-        string documento, string role, CancellationToken ct)
-    {
-        var insert = role == Perfis.Proprietario
-            ? """
-              INSERT INTO buillon.FORNECEDOR (NOME_RESPONSAVEL, DOCUMENTO, EMAIL, SENHA)
-              VALUES (@nome, @documento, @email, @senha) ON CONFLICT DO NOTHING RETURNING ID_FORNECEDOR
-              """
-            : """
-              INSERT INTO buillon.CLIENTE (NOME, CPF, EMAIL, SENHA)
-              VALUES (@nome, @documento, @email, @senha) ON CONFLICT DO NOTHING RETURNING ID_CLIENTE
-              """;
+    public Task<Usuario?> ObterPorIdAsync(int id, CancellationToken ct = default) =>
+        context.Usuarios.AsNoTracking().Include(u => u.Perfil).SingleOrDefaultAsync(u => u.Id == id, ct);
 
-        await using var connection = await context.ConectarAsync(ct);
-        await using var command = Comando(connection, insert, null, Texto("@nome", nome),
-            Texto("@email", email), Texto("@documento", documento), Texto("@senha", senhaHash));
-        if (await command.ExecuteScalarAsync(ct) is not int id)
-            throw new ApiException(409, "Já existe uma conta com este e-mail ou documento.");
-        return Perfil(id, nome, email, Perfis.AvatarPadrao, "");
+    public async Task AdicionarAsync(Usuario usuario, CancellationToken ct = default)
+    {
+        usuario.Validar();
+        if (usuario.Role == Perfis.Proprietario)
+        {
+            var fornecedor = new Fornecedor
+            {
+                NomeResponsavel = usuario.Nome, Email = usuario.Email,
+                Documento = usuario.Documento, SenhaHash = usuario.SenhaHash
+            };
+            context.Fornecedores.Add(fornecedor);
+            await context.SaveChangesAsync(ct);
+            usuario.Id = fornecedor.Id;
+        }
+        else
+        {
+            context.Usuarios.Add(usuario);
+            await context.SaveChangesAsync(ct);
+        }
     }
 
-    internal async Task<PerfilUsuario> AtualizarPerfilAsync(int id, bool proprietario, string nome, string bio, string avatar,
-        CancellationToken ct)
+    public async Task<PerfilUsuario> AtualizarPerfilAsync(int id, bool proprietario, string nome,
+        string bio, string avatar, CancellationToken ct)
     {
-        await using var connection = await context.ConectarAsync(ct);
-        await using var transaction = await connection.BeginTransactionAsync(ct);
-        var atualizarNome = proprietario
-            ? "UPDATE buillon.FORNECEDOR SET NOME_RESPONSAVEL = @nome WHERE ID_FORNECEDOR = @id RETURNING EMAIL"
-            : """
-            UPDATE buillon.CLIENTE SET NOME = @nome WHERE ID_CLIENTE = @id RETURNING EMAIL
-            """;
-        await using var conta = Comando(connection, atualizarNome, transaction, Id("@id", id), Texto("@nome", nome));
-        var email = await conta.ExecuteScalarAsync(ct) as string
-            ?? throw new ApiException(404, "Conta não encontrada.");
-
-        var atualizarPerfil = proprietario
-            ? """
-              INSERT INTO buillon.FORNECEDOR_PERFIL (ID_FORNECEDOR, BIO, AVATAR) VALUES (@id, @bio, @avatar)
-              ON CONFLICT (ID_FORNECEDOR) DO UPDATE SET BIO = excluded.BIO, AVATAR = excluded.AVATAR
-              """
-            : """
-            INSERT INTO buillon.BUILLON_APP_PERFIL (ID_CLIENTE, BIO, AVATAR) VALUES (@id, @bio, @avatar)
-            ON CONFLICT (ID_CLIENTE) DO UPDATE SET BIO = excluded.BIO, AVATAR = excluded.AVATAR
-            """;
-        await using var perfil = Comando(connection, atualizarPerfil, transaction,
-            Id("@id", id), Texto("@bio", bio), Texto("@avatar", avatar));
-        await perfil.ExecuteNonQueryAsync(ct);
+        // O bloqueio da conta serializa a criação do perfil em chamadas simultâneas.
+        await using var transaction = await context.Database.BeginTransactionAsync(ct);
+        Usuario usuario;
+        if (proprietario)
+        {
+            var conta = await context.Fornecedores
+                .FromSqlInterpolated($"SELECT * FROM buillon.fornecedor WHERE id_fornecedor = {id} FOR UPDATE")
+                .SingleOrDefaultAsync(ct) ?? throw new ApiException(404, "Conta não encontrada.");
+            await context.Entry(conta).Reference(f => f.Perfil).LoadAsync(ct);
+            conta.NomeResponsavel = nome;
+            conta.Perfil ??= new PerfilFornecedor { FornecedorId = id };
+            conta.Perfil.Bio = bio; conta.Perfil.Avatar = avatar;
+            usuario = conta.ParaUsuario();
+        }
+        else
+        {
+            usuario = await context.Usuarios
+                .FromSqlInterpolated($"SELECT * FROM buillon.cliente WHERE id_cliente = {id} FOR UPDATE")
+                .SingleOrDefaultAsync(ct) ?? throw new ApiException(404, "Conta não encontrada.");
+            await context.Entry(usuario).Reference(u => u.Perfil).LoadAsync(ct);
+            usuario.Nome = nome;
+            usuario.Perfil ??= new PerfilCliente { UsuarioId = id };
+            usuario.Perfil.Bio = bio; usuario.Perfil.Avatar = avatar;
+        }
+        await context.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
-        return Perfil(id, nome, email, avatar, bio);
+        return usuario.ParaPerfil();
     }
 
-    private static PerfilUsuario Perfil(int id, string nome, string email, string avatar, string bio) =>
-        new(id.ToString(CultureInfo.InvariantCulture), nome, email, avatar, bio);
+    private static bool ConfereDocumento(string salvo, string? informado) =>
+        informado is null || AutenticacaoNegocio.NormalizarDocumento(salvo) == informado;
 }

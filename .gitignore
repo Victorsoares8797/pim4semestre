@@ -35,6 +35,9 @@ migrate_working_dir/
 /backend/bin/
 /backend/obj/
 /backend/appsettings.Local.json
+/backend/.local/
+/backend.Tests/bin/
+/backend.Tests/obj/
 /supabase/.temp/
 .env
 .env.*

@@ -10,21 +10,21 @@ namespace Buillon.Api.Controllers;
 
 [ApiController]
 [Route("api/restaurantes")]
-public sealed class RestaurantesController(RestauranteNegocio negocio, RestauranteRepositorio restaurantes,
+public sealed class RestaurantesController(RestauranteNegocio negocio, IRestauranteRepositorio restaurantes,
     AvaliacaoRepositorio avaliacoes) : ControllerBase
 {
     private int UsuarioId => int.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!, CultureInfo.InvariantCulture);
 
     [HttpGet]
-    public Task<List<Restaurante>> Listar(string? cidade, string? bairro, CancellationToken ct,
+    public Task<List<RestauranteResposta>> Listar(string? cidade, string? bairro, CancellationToken ct,
         int pagina = 1, int tamanho = 10) => negocio.ListarNaAreaAsync(cidade, bairro, pagina, tamanho, ct);
 
     [HttpGet("{id:int}")]
-    public Task<Restaurante> Obter(int id, CancellationToken ct) => negocio.ObterPorIdAsync(id, ct);
+    public Task<RestauranteResposta> Obter(int id, CancellationToken ct) => negocio.ObterPorIdAsync(id, ct);
 
     [HttpGet("meus")]
     [Authorize(Roles = Perfis.Proprietario)]
-    public Task<List<Restaurante>> Meus(CancellationToken ct, int pagina = 1) =>
+    public Task<List<RestauranteResposta>> Meus(CancellationToken ct, int pagina = 1) =>
         negocio.ListarDoProprietarioAsync(UsuarioId, pagina, ct);
 
     [HttpGet("imagens/{id:guid}")]
@@ -47,7 +47,7 @@ public sealed class RestaurantesController(RestauranteNegocio negocio, Restauran
     [Authorize(Roles = Perfis.Proprietario)]
     public async Task<IActionResult> Cadastrar(SalvarRestauranteDto dto, CancellationToken ct)
     {
-        var id = await negocio.SalvarAsync(null, UsuarioId, dto, ct);
+        var id = await negocio.CadastrarRestauranteAsync(dto, UsuarioId, ct);
         return CreatedAtAction(nameof(Obter), new { id }, new { id });
     }
 
@@ -55,7 +55,7 @@ public sealed class RestaurantesController(RestauranteNegocio negocio, Restauran
     [Authorize(Roles = Perfis.Proprietario)]
     public async Task<IActionResult> EditarPagina(int id, SalvarRestauranteDto dto, CancellationToken ct)
     {
-        await negocio.SalvarAsync(id, UsuarioId, dto, ct);
+        await negocio.EditarPaginaDoEstabelecimentoAsync(id, UsuarioId, dto, ct);
         return NoContent();
     }
 
@@ -87,11 +87,11 @@ public sealed class RestaurantesController(RestauranteNegocio negocio, Restauran
 
     [HttpGet("avaliacoes")]
     [Authorize]
-    public Task<List<Avaliacao>> ListarAvaliacoes(CancellationToken ct) => avaliacoes.ListarAsync(ct);
+    public Task<List<AvaliacaoResposta>> ListarAvaliacoes(CancellationToken ct) => avaliacoes.ListarAsync(ct);
 
     [HttpPut("{id:int}/avaliacao")]
     [Authorize(Roles = Perfis.Cliente)]
-    public Task<Avaliacao> Avaliar(int id, SalvarAvaliacaoDto dto, CancellationToken ct) =>
+    public Task<AvaliacaoResposta> Avaliar(int id, SalvarAvaliacaoDto dto, CancellationToken ct) =>
         negocio.AvaliarRestauranteAsync(id, UsuarioId, dto, ct);
 
     [HttpDelete("avaliacoes/{id:int}")]

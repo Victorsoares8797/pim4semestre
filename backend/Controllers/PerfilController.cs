@@ -11,7 +11,7 @@ namespace Buillon.Api.Controllers;
 [ApiController]
 [Route("api/perfil")]
 [Authorize(Roles = Perfis.Cliente + "," + Perfis.Proprietario)]
-public sealed class PerfilController(UsuarioRepositorio usuarios, AvaliacaoRepositorio avaliacoes) : ControllerBase
+public sealed class PerfilController(IUsuarioRepositorio usuarios, AvaliacaoRepositorio avaliacoes) : ControllerBase
 {
     private int UsuarioId => int.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!, CultureInfo.InvariantCulture);
     private bool Proprietario => User.IsInRole(Perfis.Proprietario);

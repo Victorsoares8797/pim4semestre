@@ -1,0 +1,581 @@
+MODELOS:
+
+using System.ComponentModel.DataAnnotations;
+
+namespace Buillon.Modelos
+{
+    // Classe base: todas as outras tabelas herdam o Id e a DataCriacao para não repetir código.
+    public abstract class EntidadeBase
+    {
+        public int Id { get; set; }
+        public DateTime DataCriacao { get; protected set; } = DateTime.UtcNow;
+
+        // Obriga cada tabela a ter a sua própria regra para validar se os dados estão preenchidos.
+        public abstract void Validar();
+    }
+
+    public class Usuario : EntidadeBase
+    {
+        [Required, MaxLength(100)]
+        public string Nome { get; set; } = string.Empty;
+
+        [Required, EmailAddress, MaxLength(150)]
+        public string Email { get; set; } = string.Empty;
+
+        // Nunca guardamos a senha limpa (ex: "123456"). Guardamos um código criptografado (Hash).
+        [Required]
+        public string SenhaHash { get; set; } = string.Empty;
+
+        // Define se a pessoa logada é um cliente comum ou o dono de um restaurante.
+        [Required, MaxLength(30)]
+        public string Role { get; set; } = "Cliente"; 
+
+        public override void Validar()
+        {
+            if (string.IsNullOrWhiteSpace(Nome))
+                throw new ArgumentException("O nome do utilizador é obrigatório.");
+            if (string.IsNullOrWhiteSpace(Email) || !Email.Contains('@'))
+                throw new ArgumentException("E-mail inválido.");
+            if (Role != "Cliente" && Role != "Proprietario")
+                throw new ArgumentException("O perfil deve ser 'Cliente' ou 'Proprietario'.");
+        }
+    }
+
+    public class Restaurante : EntidadeBase
+    {
+        // O "private set" bloqueia a alteração direta (ex: restaurante.Nome = "X").
+        // Isso obriga o sistema a usar o método AtualizarPagina(), garantindo que os dados passem pela validação.
+        [Required, MaxLength(120)]
+        public string Nome { get; private set; } = string.Empty;
+        [Required, MaxLength(1000)]
+        public string Descricao { get; private set; } = string.Empty;
+        [Required, MaxLength(250)]
+        public string EnderecoCompleto { get; private set; } = string.Empty;
+        [Required, MaxLength(100)]
+        public string Bairro { get; private set; } = string.Empty;
+        [Required, MaxLength(100)]
+        public string Cidade { get; private set; } = string.Empty;
+        [MaxLength(20)]
+        public string Telefone { get; private set; } = string.Empty;
+
+        // Esta nota é atualizada sozinha pelo banco de dados (via Trigger) quando alguém avalia o restaurante.
+        public decimal NotaMedia { get; private set; }
+
+        public int ProprietarioId { get; private set; }
+        public Usuario? Proprietario { get; private set; }
+
+        // Relacionamentos: um restaurante tem vários itens no cardápio, fotos e avaliações.
+        public ICollection<ItemCardapio> Cardapio { get; private set; } = new List<ItemCardapio>();
+        public ICollection<FotoRestaurante> Fotos { get; private set; } = new List<FotoRestaurante>();
+        public ICollection<Avaliacao> Avaliacoes { get; private set; } = new List<Avaliacao>();
+
+        protected Restaurante() { } // Construtor em branco exigido pelo Entity Framework para ler do banco.
+
+        public Restaurante(string nome, string descricao, string endereco, string bairro, string cidade, string telefone, int proprietarioId)
+        {
+            ProprietarioId = proprietarioId;
+            AtualizarPagina(nome, descricao, endereco, bairro, cidade, telefone);
+        }
+
+        // Método centralizado para alterar os dados da página do restaurante com segurança.
+        public void AtualizarPagina(string nome, string desc, string endereco, string bairro, string cidade, string tel)
+        {
+            Nome = nome; Descricao = desc; EnderecoCompleto = endereco; Bairro = bairro; Cidade = cidade; Telefone = tel;
+            Validar(); // Chama a verificação logo em seguida.
+        }
+
+        public override void Validar()
+        {
+            if (string.IsNullOrWhiteSpace(Nome) || Nome.Length < 3)
+                throw new ArgumentException("O nome do restaurante deve ter pelo menos 3 caracteres.");
+            if (string.IsNullOrWhiteSpace(EnderecoCompleto) || string.IsNullOrWhiteSpace(Cidade))
+                throw new ArgumentException("O endereço e a cidade são obrigatórios.");
+        }
+    }
+
+    public class ItemCardapio : EntidadeBase
+    {
+        public int RestauranteId { get; set; }
+        [Required, MaxLength(100)]
+        public string NomePrato { get; set; } = string.Empty;
+        [MaxLength(300)]
+        public string Descricao { get; set; } = string.Empty;
+        public decimal Preco { get; set; }
+
+        public override void Validar()
+        {
+            if (string.IsNullOrWhiteSpace(NomePrato)) throw new ArgumentException("O nome do prato é obrigatório.");
+            if (Preco <= 0) throw new ArgumentException("O preço precisa de ser maior que zero.");
+        }
+    }
+
+    public class FotoRestaurante : EntidadeBase
+    {
+        public int RestauranteId { get; set; }
+        [Required, MaxLength(500)]
+        public string UrlFoto { get; set; } = string.Empty;
+        [MaxLength(150)]
+        public string Legenda { get; set; } = string.Empty;
+
+        public override void Validar()
+        {
+            if (string.IsNullOrWhiteSpace(UrlFoto)) throw new ArgumentException("O endereço da foto é obrigatório.");
+        }
+    }
+
+    public class Avaliacao : EntidadeBase
+    {
+        public int RestauranteId { get; set; }
+        public int UsuarioId { get; set; }
+        public Usuario? Usuario { get; set; }
+        public int Nota { get; set; }
+        [MaxLength(500)]
+        public string Comentario { get; set; } = string.Empty;
+
+        public override void Validar()
+        {
+            if (Nota < 1 || Nota > 5) throw new ArgumentException("A avaliação deve ter uma nota entre 1 e 5.");
+        }
+    }
+}
+
+REPOSITORIO:
+using Buillon.Modelos;
+using Microsoft.EntityFrameworkCore;
+
+namespace Buillon.Repositorio
+{
+    // O DbContext é a ponte principal entre o código C# e o banco SQL Server.
+    public class BuillonContext : DbContext
+    {
+        public BuillonContext(DbContextOptions<BuillonContext> options) : base(options) { }
+
+        public DbSet<Usuario> Usuarios { get; set; }
+        public DbSet<Restaurante> Restaurantes { get; set; }
+        public DbSet<ItemCardapio> ItensCardapio { get; set; }
+        public DbSet<FotoRestaurante> FotosRestaurante { get; set; }
+        public DbSet<Avaliacao> Avaliacoes { get; set; }
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            base.OnModelCreating(modelBuilder);
+            modelBuilder.Entity<Usuario>().HasIndex(u => u.Email).IsUnique(); // E-mail não pode repetir.
+
+            // Avisa o C# que esta tabela tem uma Trigger no banco. Se não colocar isso, 
+            // o Entity Framework tenta calcular a nota sozinho e dá erro ao salvar.
+            modelBuilder.Entity<Avaliacao>()
+                .ToTable("Avaliacoes", tb => tb.HasTrigger("TR_AtualizarNotaMediaRestaurante"));
+
+            modelBuilder.Entity<Restaurante>()
+                .ToTable("Restaurantes", tb => tb.HasTrigger("TR_AuditoriaRestaurante"))
+                .Property(r => r.NotaMedia).HasPrecision(3, 2);
+
+            modelBuilder.Entity<ItemCardapio>().Property(i => i.Preco).HasPrecision(10, 2);
+        }
+    }
+
+    // INTERFACES: Servem como contratos. O sistema diz "eu preciso listar por área", 
+    // e o repositório é quem implementa como isso vai ser feito no banco.
+    public interface IUsuarioRepositorio
+    {
+        Task<Usuario?> ObterPorEmailAsync(string email);
+        Task<Usuario?> ObterPorIdAsync(int id);
+        Task AdicionarAsync(Usuario usuario);
+    }
+
+    public class UsuarioRepositorio : IUsuarioRepositorio
+    {
+        private readonly BuillonContext _context;
+        public UsuarioRepositorio(BuillonContext context) => _context = context;
+
+        // O FirstOrDefaultAsync vai no banco e procura o primeiro e-mail igual, ou devolve nulo se não achar.
+        public async Task<Usuario?> ObterPorEmailAsync(string email) =>
+            await _context.Usuarios.FirstOrDefaultAsync(u => u.Email == email);
+
+        public async Task<Usuario?> ObterPorIdAsync(int id) => await _context.Usuarios.FindAsync(id);
+
+        public async Task AdicionarAsync(Usuario usuario)
+        {
+            _context.Usuarios.Add(usuario);
+            await _context.SaveChangesAsync(); // Efetiva a gravação no SQL.
+        }
+    }
+
+    public interface IRestauranteRepositorio
+    {
+        Task<List<Restaurante>> ListarPorAreaAsync(string? cidade, string? bairro, int pagina, int tamanho);
+        Task<List<Restaurante>> BuscarDestaquesPorProcedureAsync(string cidade, decimal notaMinima);
+        Task<Restaurante?> ObterCompletoPorIdAsync(int id);
+        Task<Restaurante?> ObterPorProprietarioIdAsync(int proprietarioId);
+        Task AdicionarAsync(Restaurante restaurante);
+        Task AtualizarAsync(Restaurante restaurante);
+        Task AdicionarItemCardapioAsync(ItemCardapio item);
+        Task AdicionarFotoAsync(FotoRestaurante foto);
+        Task AdicionarAvaliacaoAsync(Avaliacao avaliacao);
+    }
+
+    public class RestauranteRepositorio : IRestauranteRepositorio
+    {
+        private readonly BuillonContext _context;
+        public RestauranteRepositorio(BuillonContext context) => _context = context;
+
+        // PAGINAÇÃO: O ".Skip" pula os registros das páginas anteriores e o ".Take" pega só o tamanho desejado.
+        // Isso evita que o sistema trave ao tentar baixar 5.000 restaurantes para o celular de uma vez.
+        public async Task<List<Restaurante>> ListarPorAreaAsync(string? cidade, string? bairro, int pagina, int tamanho)
+        {
+            // AsNoTracking deixa a consulta mais rápida, pois avisa ao EF que não vamos editar esses dados agora.
+            var query = _context.Restaurantes.Include(r => r.Fotos).AsNoTracking().AsQueryable();
+
+            if (!string.IsNullOrWhiteSpace(cidade)) query = query.Where(r => r.Cidade.Contains(cidade));
+            if (!string.IsNullOrWhiteSpace(bairro)) query = query.Where(r => r.Bairro.Contains(bairro));
+
+            return await query.OrderByDescending(r => r.NotaMedia)
+                .Skip((pagina - 1) * tamanho)
+                .Take(tamanho)
+                .ToListAsync();
+        }
+
+        // PROCEDURE: O "FromSql" executa o comando direto no banco. Ele converte automaticamente
+        // as variáveis para parâmetros de banco (@p0, @p1), o que bloqueia invasões por SQL Injection.
+        public async Task<List<Restaurante>> BuscarDestaquesPorProcedureAsync(string cidade, decimal notaMinima)
+        {
+            return await _context.Restaurantes
+                .FromSql($"EXEC sp_BuscarRestaurantesDestaque @Cidade = {cidade}, @NotaMinima = {notaMinima}")
+                .AsNoTracking()
+                .ToListAsync();
+        }
+
+        // O Include puxa os dados das outras tabelas (Cardápio e Fotos) na mesma consulta, tipo um JOIN do SQL.
+        public async Task<Restaurante?> ObterCompletoPorIdAsync(int id)
+        {
+            return await _context.Restaurantes
+                .Include(r => r.Cardapio)
+                .Include(r => r.Fotos)
+                .Include(r => r.Avaliacoes).ThenInclude(a => a.Usuario)
+                .FirstOrDefaultAsync(r => r.Id == id);
+        }
+
+        public async Task<Restaurante?> ObterPorProprietarioIdAsync(int proprietarioId)
+        {
+            return await _context.Restaurantes
+                .Include(r => r.Cardapio).Include(r => r.Fotos)
+                .FirstOrDefaultAsync(r => r.ProprietarioId == proprietarioId);
+        }
+
+        public async Task AdicionarAsync(Restaurante restaurante) { _context.Restaurantes.Add(restaurante); await _context.SaveChangesAsync(); }
+        public async Task AtualizarAsync(Restaurante restaurante) { _context.Restaurantes.Update(restaurante); await _context.SaveChangesAsync(); }
+        public async Task AdicionarItemCardapioAsync(ItemCardapio item) { _context.ItensCardapio.Add(item); await _context.SaveChangesAsync(); }
+        public async Task AdicionarFotoAsync(FotoRestaurante foto) { _context.FotosRestaurante.Add(foto); await _context.SaveChangesAsync(); }
+        public async Task AdicionarAvaliacaoAsync(Avaliacao avaliacao) { _context.Avaliacoes.Add(avaliacao); await _context.SaveChangesAsync(); }
+    }
+}
+
+NEGOCIO:
+using System.Security.Cryptography;
+using System.Text;
+using Buillon.Modelos;
+using Buillon.Repositorio;
+
+namespace Buillon.Negocio
+{
+    public class AutenticacaoNegocio
+    {
+        private readonly IUsuarioRepositorio _usuarioRepositorio;
+        private readonly IRestauranteRepositorio _restauranteRepositorio;
+
+        public AutenticacaoNegocio(IUsuarioRepositorio usuarioRepositorio, IRestauranteRepositorio restauranteRepositorio)
+        {
+            _usuarioRepositorio = usuarioRepositorio;
+            _restauranteRepositorio = restauranteRepositorio;
+        }
+
+        public async Task<Usuario> RegistarUsuarioAsync(string nome, string email, string senhaPlana, string role)
+        {
+            if (string.IsNullOrWhiteSpace(senhaPlana) || senhaPlana.Length < 6)
+                throw new ArgumentException("A palavra-passe deve ter pelo menos 6 caracteres.");
+
+            var existente = await _usuarioRepositorio.ObterPorEmailAsync(email);
+            if (existente is not null) throw new ArgumentException("Já existe uma conta registada com este e-mail.");
+
+            var novoUsuario = new Usuario
+            {
+                Nome = nome, Email = email, Role = role,
+                SenhaHash = GerarHashSenha(senhaPlana) // Criptografa a senha antes de guardar
+            };
+
+            novoUsuario.Validar();
+            await _usuarioRepositorio.AdicionarAsync(novoUsuario);
+            return novoUsuario;
+        }
+
+        public async Task<(Usuario Usuario, int? RestauranteDoProprietarioId)> ValidarLoginAsync(string email, string senhaPlana)
+        {
+            var usuario = await _usuarioRepositorio.ObterPorEmailAsync(email);
+            
+            // Refaz o Hash com a senha digitada no login e compara com o Hash guardado no banco
+            if (usuario is null || usuario.SenhaHash != GerarHashSenha(senhaPlana))
+                throw new UnauthorizedAccessException("E-mail ou palavra-passe inválidos.");
+
+            // Se for dono, já procura no banco qual é o restaurante dele para carregar o painel mais rápido.
+            int? restauranteId = null;
+            if (usuario.Role == "Proprietario")
+            {
+                var meuRestaurante = await _restauranteRepositorio.ObterPorProprietarioIdAsync(usuario.Id);
+                restauranteId = meuRestaurante?.Id;
+            }
+
+            return (usuario, restauranteId);
+        }
+
+        // Cria o código irreversível (Hash). O "Salt" adicionado dificulta a quebra caso o banco vaze.
+        private static string GerarHashSenha(string senha)
+        {
+            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes("BuillonSalt2026_" + senha));
+            return Convert.ToBase64String(bytes);
+        }
+    }
+
+    public class RestauranteNegocio
+    {
+        private readonly IRestauranteRepositorio _repositorio;
+        public RestauranteNegocio(IRestauranteRepositorio repositorio) => _repositorio = repositorio;
+
+        public async Task<List<Restaurante>> ListarNaAreaAsync(string? cidade, string? bairro, int pagina = 1, int tamanho = 10)
+        {
+            if (pagina < 1) pagina = 1; if (tamanho < 1 || tamanho > 50) tamanho = 10;
+            return await _repositorio.ListarPorAreaAsync(cidade, bairro, pagina, tamanho);
+        }
+
+        public async Task<List<Restaurante>> ListarDestaquesViaProcedureAsync(string cidade, decimal notaMinima)
+        {
+            if (string.IsNullOrWhiteSpace(cidade)) throw new ArgumentException("A cidade é obrigatória.");
+            return await _repositorio.BuscarDestaquesPorProcedureAsync(cidade, notaMinima);
+        }
+
+        public async Task<Restaurante?> ObterPorIdAsync(int id) => await _repositorio.ObterCompletoPorIdAsync(id);
+        public async Task<Restaurante?> ObterPaginaDoProprietarioAsync(int proprietarioId) => await _repositorio.ObterPorProprietarioIdAsync(proprietarioId);
+        public async Task<Restaurante> CadastrarRestauranteAsync(Restaurante novoRestaurante)
+        {
+            novoRestaurante.Validar();
+            await _repositorio.AdicionarAsync(novoRestaurante);
+            return novoRestaurante;
+        }
+
+        // REGRA PRINCIPAL DE SEGURANÇA: Garante que um dono não edite o restaurante de um concorrente.
+        public async Task EditarPaginaDoEstabelecimentoAsync(
+            int restauranteId, int proprietarioLogadoId, string nome, string descricao, 
+            string enderecoCompleto, string bairro, string cidade, string telefone)
+        {
+            var restaurante = await _repositorio.ObterCompletoPorIdAsync(restauranteId)
+                ?? throw new KeyNotFoundException("Restaurante não encontrado.");
+
+            // Verifica se o dono que fez o login é o mesmo dono registrado neste restaurante.
+            if (restaurante.ProprietarioId != proprietarioLogadoId)
+                throw new UnauthorizedAccessException("Não tem permissão para editar a página de outro proprietário.");
+
+            restaurante.AtualizarPagina(nome, descricao, enderecoCompleto, bairro, cidade, telefone);
+            await _repositorio.AtualizarAsync(restaurante);
+        }
+
+        public async Task AdicionarItemCardapioAsync(int restauranteId, int proprietarioLogadoId, ItemCardapio item)
+        {
+            var restaurante = await _repositorio.ObterCompletoPorIdAsync(restauranteId) ?? throw new KeyNotFoundException();
+            if (restaurante.ProprietarioId != proprietarioLogadoId) throw new UnauthorizedAccessException();
+            
+            item.RestauranteId = restauranteId;
+            item.Validar();
+            await _repositorio.AdicionarItemCardapioAsync(item);
+        }
+
+        public async Task AvaliarRestauranteAsync(int restauranteId, int usuarioLogadoId, int nota, string comentario)
+        {
+            var restaurante = await _repositorio.ObterCompletoPorIdAsync(restauranteId) ?? throw new KeyNotFoundException();
+            
+            // Regra: O dono não pode avaliar o próprio estabelecimento para subir a nota artificialmente.
+            if (restaurante.ProprietarioId == usuarioLogadoId)
+                throw new ArgumentException("O proprietário não pode avaliar o próprio restaurante.");
+
+            var avaliacao = new Avaliacao { RestauranteId = restauranteId, UsuarioId = usuarioLogadoId, Nota = nota, Comentario = comentario };
+            avaliacao.Validar();
+            await _repositorio.AdicionarAvaliacaoAsync(avaliacao);
+        }
+    }
+}
+
+API:
+
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
+using Buillon.Modelos;
+using Buillon.Negocio;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.IdentityModel.Tokens;
+
+namespace Buillon.Api.Controllers
+{
+    // DTOs são formatos de dados feitos sob medida para a requisição. Evitam trafegar dados sensíveis, como a senha do banco.
+    public record LoginDto(string Email, string Senha);
+    public record RegistoUsuarioDto(string Nome, string Email, string Senha, string Role);
+
+    [ApiController]
+    [Route("api/auth")]
+    [AllowAnonymous] // Permite acesso sem login para a pessoa conseguir se registrar.
+    public class AuthController : ControllerBase
+    {
+        private readonly AutenticacaoNegocio _authNegocio;
+        private readonly IConfiguration _config;
+
+        public AuthController(AutenticacaoNegocio authNegocio, IConfiguration config)
+        {
+            _authNegocio = authNegocio;
+            _config = config;
+        }
+
+        [HttpPost("registar")]
+        public async Task<IActionResult> Registar([FromBody] RegistoUsuarioDto dto)
+        {
+            try
+            {
+                var usuario = await _authNegocio.RegistarUsuarioAsync(dto.Nome, dto.Email, dto.Senha, dto.Role);
+                return StatusCode(201, new { usuario.Id, usuario.Nome, usuario.Email, usuario.Role });
+            }
+            catch (ArgumentException ex) { return Problem(detail: ex.Message, statusCode: 400); }
+        }
+
+        [HttpPost("login")]
+        public async Task<IActionResult> Login([FromBody] LoginDto dto)
+        {
+            try
+            {
+                var (usuario, restauranteId) = await _authNegocio.ValidarLoginAsync(dto.Email, dto.Senha);
+                var token = GerarTokenJwt(usuario); // Gera o "crachá" assinado.
+
+                return Ok(new { token, usuario.Id, usuario.Nome, usuario.Role, restauranteId });
+            }
+            catch (UnauthorizedAccessException) { return Unauthorized(); } // Devolve Erro 401: Acesso Negado.
+        }
+
+        // Monta o JWT. O token contém dados do usuário (Claims) que a API lê nas próximas requisições.
+        private string GerarTokenJwt(Usuario usuario)
+        {
+            var chave = _config["Jwt:Key"] ?? "ChaveSecretaBuillonDesenvolvimentoComMaisDe32Caracteres!";
+            var credenciais = new SigningCredentials(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(chave)), SecurityAlgorithms.HmacSha256);
+
+            var claims = new[]
+            {
+                new Claim(ClaimTypes.NameIdentifier, usuario.Id.ToString()),
+                new Claim(ClaimTypes.Role, usuario.Role) // É aqui que o sistema anota se é "Proprietário" ou "Cliente".
+            };
+
+            var token = new JwtSecurityToken(claims: claims, expires: DateTime.UtcNow.AddHours(8), signingCredentials: credenciais);
+            return new JwtSecurityTokenHandler().WriteToken(token);
+        }
+    }
+}
+
+CONTROLLER RESTAURANTE:
+using System.Security.Claims;
+using Buillon.Negocio;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+
+namespace Buillon.Api.Controllers
+{
+    public record SalvarRestauranteDto(string Nome, string Descricao, string EnderecoCompleto, string Bairro, string Cidade, string Telefone);
+
+    [ApiController]
+    [Route("api/restaurantes")]
+    [Authorize] // Obriga TODAS as rotas desta classe a receberem um Token JWT válido no cabeçalho.
+    public class RestaurantesController : ControllerBase
+    {
+        private readonly RestauranteNegocio _negocio;
+
+        public RestaurantesController(RestauranteNegocio negocio) => _negocio = negocio;
+
+        // Como tem o [AllowAnonymous], esta rota ignora a regra geral e permite busca pública.
+        [HttpGet]
+        [AllowAnonymous] 
+        public async Task<IActionResult> Listar([FromQuery] string? cidade, [FromQuery] string? bairro, int pagina = 1)
+        {
+            var lista = await _negocio.ListarNaAreaAsync(cidade, bairro, pagina, 10);
+            return Ok(lista); 
+        }
+
+        // [Authorize(Roles = "Proprietario")] restringe ainda mais. 
+        // Só aceita o token se, lá no AuthController, a Role guardada no crachá for "Proprietario".
+        [HttpPut("{id:int}")]
+        [Authorize(Roles = "Proprietario")]
+        public async Task<IActionResult> EditarPagina(int id, [FromBody] SalvarRestauranteDto dto)
+        {
+            try
+            {
+                // Lê o Id do dono diretamente de dentro do Token JWT. O usuário não manda o próprio ID no payload, 
+                // a API puxa da assinatura segura.
+                int proprietarioId = int.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "0");
+                
+                await _negocio.EditarPaginaDoEstabelecimentoAsync(
+                    id, proprietarioId, dto.Nome, dto.Descricao,
+                    dto.EnderecoCompleto, dto.Bairro, dto.Cidade, dto.Telefone);
+
+                return NoContent(); // Erro 204: Deu certo, atualizou, não tenho nada novo para devolver.
+            }
+            catch (KeyNotFoundException) { return NotFound(); } // 404
+            catch (UnauthorizedAccessException) { return Forbid(); } // 403: O token é bom, mas o dono está mexendo no restaurante errado.
+            catch (ArgumentException ex) { return Problem(detail: ex.Message, statusCode: 400); }
+        }
+    }
+}
+
+PROGRAM.CS
+
+using System.Text;
+using Buillon.Negocio;
+using Buillon.Repositorio;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddDbContext<BuillonContext>(options =>
+    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+
+// Injeção de dependências: ensina a API onde procurar a classe Repositorio quando a Negocio pedir.
+builder.Services.AddScoped<IUsuarioRepositorio, UsuarioRepositorio>();
+builder.Services.AddScoped<IRestauranteRepositorio, RestauranteRepositorio>();
+builder.Services.AddScoped<AutenticacaoNegocio>();
+builder.Services.AddScoped<RestauranteNegocio>();
+
+// Libera o acesso para navegadores (ex: quando o Flutter Web for chamar a API).
+builder.Services.AddCors(opcoes => opcoes.AddDefaultPolicy(p => p.WithOrigins("http://localhost:5173").AllowAnyHeader().AllowAnyMethod()));
+
+// Configura o cadeado: ensina a API a ler e conferir a assinatura do Token JWT.
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options => {
+        options.TokenValidationParameters = new TokenValidationParameters {
+            ValidateIssuer = false, ValidateAudience = false, ValidateLifetime = true, ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"] ?? "ChaveSecretaBuillonDesenvolvimentoComMaisDe32Caracteres!"))
+        };
+    });
+
+builder.Services.AddAuthorization();
+builder.Services.AddControllers();
+builder.Services.AddOpenApi(); // Documentação interativa da API
+
+var app = builder.Build();
+
+if (app.Environment.IsDevelopment()) { app.MapOpenApi(); }
+
+app.UseHttpsRedirection();
+app.UseCors();
+
+// ORDEM OBRIGATÓRIA:
+// 1º: A API vê QUEM bateu na porta (Verifica o Token).
+app.UseAuthentication();
+// 2º: A API decide O QUE a pessoa pode fazer (Verifica as Roles/Permissões).
+app.UseAuthorization();
+
+app.MapControllers();
+app.Run();

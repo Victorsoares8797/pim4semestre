@@ -5,7 +5,7 @@ using Microsoft.AspNetCore.Identity;
 
 namespace Buillon.Negocio;
 
-public sealed class AutenticacaoNegocio(UsuarioRepositorio usuarios, IPasswordHasher<string> hasher,
+public sealed class AutenticacaoNegocio(IUsuarioRepositorio usuarios, IPasswordHasher<string> hasher,
     SessaoNegocio sessoes)
 {
     public async Task<SessaoUsuario> RegistarUsuarioAsync(RegistoUsuarioDto dto, CancellationToken ct)
@@ -24,8 +24,14 @@ public sealed class AutenticacaoNegocio(UsuarioRepositorio usuarios, IPasswordHa
         if (role == Perfis.Proprietario && (documento.Length != 14 || !documento.All(char.IsAsciiDigit)))
             throw new ApiException(400, "Informe o CNPJ com 14 dígitos.");
 
-        var perfil = await usuarios.AdicionarAsync(nome, email, hasher.HashPassword(email, senha), documento, role, ct);
-        return sessoes.Abrir(perfil, role);
+        var usuario = new Usuario
+        {
+            Nome = nome, Email = email, Documento = documento, Role = role,
+            SenhaHash = hasher.HashPassword(email, senha)
+        };
+        usuario.Validar();
+        await usuarios.AdicionarAsync(usuario, ct);
+        return sessoes.Abrir(usuario.ParaPerfil(), role);
     }
 
     public async Task<SessaoUsuario> ValidarLoginAsync(LoginDto dto, CancellationToken ct)
@@ -42,9 +48,9 @@ public sealed class AutenticacaoNegocio(UsuarioRepositorio usuarios, IPasswordHa
             throw CredenciaisInvalidas();
 
         var conta = await usuarios.ObterPorEmailAsync(email, role, documento, ct);
-        if (conta is not { Senha: not null } dados || !VerificarSenha(email, dados.Senha, senha))
+        if (conta is null || !VerificarSenha(email, conta.SenhaHash, senha))
             throw CredenciaisInvalidas();
-        return sessoes.Abrir(dados.Perfil, role);
+        return sessoes.Abrir(conta.ParaPerfil(), role);
     }
 
     private bool VerificarSenha(string email, string hash, string senha)

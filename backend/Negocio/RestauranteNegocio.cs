@@ -3,25 +3,32 @@ using Buillon.Repositorio;
 
 namespace Buillon.Negocio;
 
-public sealed class RestauranteNegocio(RestauranteRepositorio restaurantes, AvaliacaoRepositorio avaliacoes)
+public sealed class RestauranteNegocio(IRestauranteRepositorio restaurantes, AvaliacaoRepositorio avaliacoes)
 {
-    public Task<List<Restaurante>> ListarDoProprietarioAsync(int fornecedor, int pagina, CancellationToken ct)
+    public async Task<List<RestauranteResposta>> ListarDoProprietarioAsync(int fornecedor, int pagina, CancellationToken ct)
     {
         if (pagina is < 1 or > 1_000_000) throw new ApiException(400, "Informe uma página válida.");
-        return restaurantes.ListarPorAreaAsync(null, null, null, pagina, 50, ct, fornecedor: fornecedor);
+        return (await restaurantes.ListarDoProprietarioAsync(fornecedor, pagina, ct)).Select(r => ParaResposta(r, true)).ToList();
     }
 
-    public Task<List<Restaurante>> ListarNaAreaAsync(string? cidade, string? bairro, int pagina, int tamanho,
+    public async Task<List<RestauranteResposta>> ListarNaAreaAsync(string? cidade, string? bairro, int pagina, int tamanho,
         CancellationToken ct)
     {
         if (pagina is < 1 or > 1_000_000 || tamanho is < 1 or > 50)
             throw new ApiException(400, "Informe uma página válida e um tamanho de 1 a 50.");
-        return restaurantes.ListarPorAreaAsync(Opcional(cidade, 50), Opcional(bairro, 50), null, pagina, tamanho, ct);
+        return (await restaurantes.ListarPorAreaAsync(Opcional(cidade, 50), Opcional(bairro, 50), pagina, tamanho, ct))
+            .Select(r => ParaResposta(r, false)).ToList();
     }
 
-    public async Task<Restaurante> ObterPorIdAsync(int id, CancellationToken ct) =>
-        (await restaurantes.ListarPorAreaAsync(null, null, id, 1, 1, ct)).FirstOrDefault()
-        ?? throw new ApiException(404, "Restaurante não encontrado.");
+    public async Task<RestauranteResposta> ObterPorIdAsync(int id, CancellationToken ct) =>
+        ParaResposta(await restaurantes.ObterCompletoPorIdAsync(id, ct)
+            ?? throw new ApiException(404, "Restaurante não encontrado."), false);
+
+    public Task<int> CadastrarRestauranteAsync(SalvarRestauranteDto dto, int proprietarioId, CancellationToken ct) =>
+        SalvarAsync(null, proprietarioId, dto, ct);
+
+    public Task<int> EditarPaginaDoEstabelecimentoAsync(int id, int proprietarioId, SalvarRestauranteDto dto, CancellationToken ct) =>
+        SalvarAsync(id, proprietarioId, dto, ct);
 
     public Task<int> SalvarAsync(int? id, int fornecedor, SalvarRestauranteDto dto, CancellationToken ct,
         string? arquivo = null)
@@ -91,13 +98,27 @@ public sealed class RestauranteNegocio(RestauranteRepositorio restaurantes, Aval
         return tipo is null ? throw new ApiException(400, "Selecione uma foto JPG, PNG ou WebP.") : new(tipo, dados);
     }
 
-    public Task<Avaliacao> AvaliarRestauranteAsync(int restaurante, int cliente, SalvarAvaliacaoDto dto,
+    public Task<AvaliacaoResposta> AvaliarRestauranteAsync(int restaurante, int cliente, SalvarAvaliacaoDto dto,
         CancellationToken ct)
     {
         if (dto.Rating is < 1 or > 5 || dto.NpsNota is < 0 or > 10)
             throw new ApiException(400, "Use de 1 a 5 estrelas e, se preenchido, um NPS de 0 a 10.");
         return avaliacoes.SalvarAsync(cliente, restaurante, dto.Rating,
             Obrigatorio(dto.Comment, "Comentário", 10, 1000), dto.NpsNota, ct);
+    }
+
+    private static RestauranteResposta ParaResposta(Restaurante r, bool incluirDados)
+    {
+        var endereco = r.EnderecoPrincipal;
+        return new(RestauranteRepositorio.Chave(r.Id), r.Nome, r.Categoria?.Nome ?? "", r.Bairro,
+            r.EnderecoCompleto, r.Descricao ?? "", r.Fotos.OrderBy(f => f.Id).FirstOrDefault()?.UrlFoto ?? "",
+            r.FaixaPreco ?? "", r.Horario ?? "",
+            r.Cardapio.OrderBy(i => i.Id).Select(i => new ItemCardapioResposta(i.NomePrato, i.Descricao, i.Imagem, i.Preco)).ToList(),
+            r.Fotos.OrderBy(f => f.Id).Select(f => new FotoRestauranteResposta(f.UrlFoto, f.Legenda)).ToList(),
+            r.Publicacoes.OrderByDescending(p => p.Id).Select(p => new PublicacaoResposta(p.Id, p.Comentario, p.CriadoEm)).ToList(),
+            incluirDados ? new DadosEstabelecimento(r.CategoriaId, r.Cnpj ?? "", endereco?.Rua ?? "",
+                endereco?.Numero ?? "", r.Bairro, r.Cidade, endereco?.Estado ?? "", endereco?.Cep ?? "", r.Telefone ?? "") : null,
+            r.ChaveExemplo is not null);
     }
 
     internal static string Obrigatorio(string? valor, string campo, int minimo, int maximo)

@@ -45,7 +45,7 @@ O Flutter chama a API .NET 10, que usa o PostgreSQL do Supabase. Configure a con
 
 Os 12 restaurantes fictícios da demonstração também aparecem em **Explorar** no modo integrado, identificados como **Exemplo**. As avaliações fictícias ficam na demonstração. As fotografias ilustrativas ficam em `assets/images/`. Créditos em [assets/CREDITS.md](assets/CREDITS.md). As fontes Manrope e Lora incluem suas licenças OFL em `assets/fonts/`.
 
-Para entender o projeto passo a passo, leia [Como o código funciona](docs/COMO_O_CODIGO_FUNCIONA.md).
+Para entender o projeto passo a passo, leia [Como o código funciona](docs/COMO_O_CODIGO_FUNCIONA.md). A [comparação com o código original e o roteiro de apresentação](docs/APRESENTACAO.md) explicam as adaptações para o Supabase.
 
 ## Organização
 
@@ -60,10 +60,10 @@ lib/
     data/                           repositórios em memória e HTTP
     ui/                             telas, componentes e tema
 backend/
-  Controllers/                      rotas ASP.NET Core
-  Modelos/                          modelos e contratos JSON
+  Controllers/                      rotas ASP.NET Core e autorização JWT
+  Modelos/                          entidades, validações e contratos JSON
   Negocio/                          validação, autenticação e sessões
-  Repositorio/                      acesso ao PostgreSQL do Supabase
+  Repositorio/                      interfaces e Entity Framework para PostgreSQL
 database/                           scripts originais do SQL Server
 supabase/migrations/                esquema PostgreSQL do Buillon
 ```
@@ -76,6 +76,7 @@ flutter test --reporter expanded
 flutter build web --release --no-web-resources-cdn
 flutter build apk --debug
 dotnet build backend/Buillon.Api.csproj
+dotnet test backend.Tests/Buillon.Api.Tests.csproj
 ```
 
 Os testes cobrem médias, desempate e limite do ranking, JSON, cadastro, login, isolamento de favoritos, permissões sobre avaliações, validações, atualização de perfil e navegação responsiva. `test/visual_test.dart` também salva capturas reais em `docs/screenshots/`.

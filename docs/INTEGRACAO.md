@@ -1,6 +1,6 @@
 # Buillon com Supabase
 
-O site HTML e o aplicativo Flutter usam a API ASP.NET Core em `backend/`. A API usa Npgsql para ler e gravar no esquema privado `buillon` do PostgreSQL. O site usa a API no próprio domínio para cadastro, login e sessão. A conexão PostgreSQL fica no servidor.
+O site HTML e o aplicativo Flutter usam a API ASP.NET Core em `backend/`. A API usa Entity Framework Core com o provedor Npgsql para ler e gravar no esquema privado `buillon` do PostgreSQL. O site usa a API no próprio domínio para cadastro, login e sessão. A conexão PostgreSQL fica no servidor.
 
 ## 1. Preparar o esquema
 
@@ -56,7 +56,7 @@ Em **Explorar**, as duas contas veem os estabelecimentos cadastrados e os 12 res
 | `POST /api/restaurantes/{id}/fotos` | Proprietário. `arquivo` em Base64 ou `url` HTTPS, com `legenda` opcional. |
 | `POST /api/restaurantes/{id}/publicacoes` | Proprietário. Publica `comentario` na página do estabelecimento. |
 
-As rotas autenticadas recebem `Authorization: Bearer <token>`. Cadastro e login retornam o token e o perfil. A sessão dura até oito horas no processo da API. A senha de uma nova conta é gravada como hash com salt pelo `PasswordHasher` do ASP.NET Core. Contas antigas com outro formato de senha precisam ser migradas.
+As rotas autenticadas recebem `Authorization: Bearer <token>`. Cadastro e login retornam o token e o perfil. A API emite um JWT assinado com validade de até oito horas. A chave é configurada por `Jwt:Key` (ou `Jwt__Key` no ambiente) ou gerada automaticamente em `backend/.local/jwt.key`. Os identificadores revogados pelo logout ficam em `backend/.local/jwt-revogados.json`. Preserve essa pasta para manter a chave e as revogações ao reiniciar; ela não entra no Git nem na publicação. Em hospedagem, configure a chave e mantenha a pasta privada em armazenamento persistente. A senha de uma nova conta é gravada como hash com salt pelo `PasswordHasher` do ASP.NET Core. Contas antigas com outro formato de senha precisam ser migradas.
 
 ### Criar o primeiro restaurante
 
@@ -86,3 +86,9 @@ Invoke-RestMethod "$api/restaurantes" -Method Post -ContentType 'application/jso
 - As estrelas do Flutter são gravadas em `NPS_GERAL`. A nota `NPS_NOTA` é opcional na API e é preservada quando a edição informa apenas as estrelas. Os novos registros de avaliação recebem data em UTC.
 - O cliente Flutter reúne as páginas do catálogo para manter a busca e os filtros atuais. O Top 10 usa a ordem retornada pelo PostgreSQL e pode ser calculado localmente durante uma falha isolada da rota de ranking.
 
+
+## Estrutura próxima do código original
+
+A API usa entidades com `EntidadeBase` e `Validar`, interfaces de repositórios, `DbContext`, `DbSet`, `Include`, `SaveChangesAsync` e autenticação JWT. As entidades são mapeadas às 14 tabelas existentes, sem chamar `EnsureCreated` ou `Migrate`. Os DTOs preservam o contrato do aplicativo e do site. A comparação e o roteiro de demonstração estão em [APRESENTACAO.md](APRESENTACAO.md).
+
+Em desenvolvimento, a especificação OpenAPI fica em `/openapi/v1.json`. Para habilitá-la, defina `ASPNETCORE_ENVIRONMENT=Development` antes de iniciar a API. A especificação descreve as rotas; não inclui uma interface Swagger UI.
